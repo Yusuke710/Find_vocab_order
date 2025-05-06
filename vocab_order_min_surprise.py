@@ -257,9 +257,17 @@ def build_dependency_graph(vocab_list: list[str], sentences_map: dict[str, str],
     return graph
 
 # ---------------- 4. Optimal Ordering Algorithm ----------------
-def find_min_surprise_order(words_to_order: list[str], sentences_map: dict[str, str], prereq_graph: nx.DiGraph, seed_vocab: set[str], tokenized_sentences: dict[str, list[str]]) -> list[str]:
+def find_min_surprise_order(
+    words_to_order: list[str], 
+    sentences_map: dict[str, str], 
+    prereq_graph: nx.DiGraph, 
+    seed_vocab: set[str], 
+    tokenized_sentences: dict[str, list[str]],
+    original_index_map: dict[str, int] # Add parameter for original index
+) -> list[str]:
     """Performs a sort prioritizing words whose sentences introduce fewest new tokens,
     ensuring words are added once all prerequisites (including seeds) are met.
+    Tie-breaking: prioritizes words with lower original index.
 
     Args:
         words_to_order: List of vocabulary words to sort.
@@ -268,6 +276,7 @@ def find_min_surprise_order(words_to_order: list[str], sentences_map: dict[str, 
                       Includes edges from seed words and between vocab words.
         seed_vocab: Set of initial known words (not part of words_to_order).
         tokenized_sentences: Dictionary mapping words to their tokenized sentences.
+        original_index_map: Dictionary mapping words to their original 0-based index.
 
     Returns:
         A list of words from words_to_order in the calculated optimal order.
@@ -309,9 +318,13 @@ def find_min_surprise_order(words_to_order: list[str], sentences_map: dict[str, 
     while queue:
         # Find word in queue whose sentence adds the fewest unknown tokens
         # Use pre-tokenized sentences here for cost calculation
+        # Tie-breaking: use original index (lower is better)
         best_word = min(
             queue,
-            key=lambda w: sum(token not in current_known for token in tokenized_sentences.get(w, []))
+            key=lambda w: (
+                sum(token not in current_known for token in tokenized_sentences.get(w, [])),
+                original_index_map.get(w, float('inf')) # Use original index for tie-breaking
+            )
         )
 
         queue.remove(best_word)
@@ -564,7 +577,8 @@ def main():
     dependency_graph = build_dependency_graph(original_vocab_list, sentences, SEED_WORDS, tokenized_sentences) # Pass tokenized
 
     # 4. Find Optimal Order (pass tokenized sentences)
-    optimal_vocab_list = find_min_surprise_order(original_vocab_list, sentences, dependency_graph, SEED_WORDS, tokenized_sentences) # Pass tokenized
+    original_index_map = {word: i for i, word in enumerate(original_vocab_list)}
+    optimal_vocab_list = find_min_surprise_order(original_vocab_list, sentences, dependency_graph, SEED_WORDS, tokenized_sentences, original_index_map) # Pass tokenized and original index map
 
     # 5. Analyze and Save Results
     analyze_order_similarity(original_vocab_list, optimal_vocab_list)
