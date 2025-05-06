@@ -67,13 +67,14 @@ def tokenize(text: str) -> list[str]:
 
 # ---------------- 1. Data Loading ----------------
 def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.DataFrame:
-    """Loads vocabulary lists, keeps essential columns, and removes duplicates."""
+    """Loads vocabulary lists, adds level info, keeps essential columns, and removes duplicates."""
     print(f"Loading vocabulary from {len(levels)} levels...")
     dfs = []
     required_cols = {vocab_col, 'reading', 'meaning'} # Columns we need
 
-    for level in levels:
-        url = base_url + level
+    for level_file in levels:
+        url = base_url + level_file
+        level_name = level_file.split('.')[0].upper() # Extract N5, N4 etc.
         try:
             response = requests.get(url)
             response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
@@ -82,11 +83,15 @@ def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.Data
             # Check if required columns exist
             missing_cols = required_cols - set(df.columns)
             if missing_cols:
-                print(f"Warning: File for level '{level}' is missing columns: {missing_cols}. Skipping this level.", file=sys.stderr)
+                print(f"Warning: File for level '{level_name}' ({level_file}) is missing columns: {missing_cols}. Skipping this level.", file=sys.stderr)
                 continue
 
-            # Select only the columns we need
-            dfs.append(df[list(required_cols)])
+            # Add the level information
+            df['jlpt_level'] = level_name
+
+            # Select only the columns we need (including the new level)
+            cols_to_keep = list(required_cols) + ['jlpt_level']
+            dfs.append(df[cols_to_keep])
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching {url}: {e}", file=sys.stderr)
@@ -100,17 +105,18 @@ def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.Data
         sys.exit(1)
 
     # Concatenate and drop duplicates based on the main vocabulary word
-    # Keep the first occurrence to retain its reading/meaning
+    # Keep the first occurrence to retain its reading/meaning/level
     vocab_df = (
         pd.concat(dfs, ignore_index=True)
         .drop_duplicates(subset=[vocab_col], keep='first')
         .reset_index(drop=True)
     )
-    # Ensure reading/meaning are strings, fill NaNs
+    # Ensure reading/meaning/level are strings, fill NaNs
     vocab_df['reading'] = vocab_df['reading'].fillna('').astype(str)
     vocab_df['meaning'] = vocab_df['meaning'].fillna('').astype(str)
+    vocab_df['jlpt_level'] = vocab_df['jlpt_level'].fillna('Unknown').astype(str) # Handle potential rare cases
 
-    print(f"Loaded {len(vocab_df)} unique words with reading/meaning.")
+    print(f"Loaded {len(vocab_df)} unique words with reading, meaning, and level.")
     return vocab_df
 
 # ---------------- 2. Sentence Generation ----------------
@@ -364,36 +370,43 @@ def save_comparison_csv(
     sentences_map: dict[str, str],
     reading_map: dict[str, str],
     meaning_map: dict[str, str],
+    level_map: dict[str, str],
     tokenized_sentences: dict[str, list[str]],
     seed_words: set[str]
 ):
-    """Saves the comparison including cost, reading, and meaning."""
+    """Saves the comparison including cost, reading, meaning, level, tokenization (surface), and unknown tokens."""
     print(f"\n--- Saving Comparison to CSV ({output_path}) ---")
 
     original_indices = {word: i for i, word in enumerate(original_list)}
     results_data = []
     processed_words_optimal_order = set(optimal_list)
 
-    # --- Calculate costs for optimally placed words --- 
+    # --- Calculate costs and unknown tokens for optimally placed words --- 
     word_costs = {}
+    unknown_tokens_map = {} # Store the list of unknown tokens (surface forms)
     current_known_for_cost = set(seed_words)
     for word in optimal_list:
-        tokens = tokenized_sentences.get(word, [])
-        cost = sum(token not in current_known_for_cost for token in tokens)
+        tokens = tokenized_sentences.get(word, []) # Use surface forms for cost calc
+        unknown_tokens_at_step = [token for token in tokens if token not in current_known_for_cost]
+        cost = len(unknown_tokens_at_step)
         word_costs[word] = cost
+        unknown_tokens_map[word] = unknown_tokens_at_step # Store the list of surface forms
         current_known_for_cost.add(word) # Add word after calculating its cost
-    # -----------------------------------------------
+    # -----------------------------------------------------------------
 
     # Add words that ARE in the optimal order
     for i, word in enumerate(optimal_list):
         results_data.append({
             "word": word,
             "sentence": sentences_map.get(word, ""),
+            "jlpt_level": level_map.get(word, ""),
             "original_index": original_indices.get(word, -1),
             "optimal_index": i,
-            "number_of_unknown_tokens": word_costs.get(word, -1), # Get calculated cost
+            "number_of_unknown_tokens": word_costs.get(word, -1),
+            "unknown_tokens_in_sentence": ', '.join(unknown_tokens_map.get(word, [])),
+            "tokenized_sentence_surface": ', '.join(tokenized_sentences.get(word, [])),
             "reading": reading_map.get(word, ""),
-            "meaning": meaning_map.get(word, "")
+            "meaning": meaning_map.get(word, ""),
         })
 
     # Add words that were NOT placed in the optimal order
@@ -403,11 +416,14 @@ def save_comparison_csv(
             results_data.append({
                 "word": word,
                 "sentence": sentences_map.get(word, ""),
+                "jlpt_level": level_map.get(word, ""),
                 "original_index": i,
                 "optimal_index": -1,
-                "number_of_unknown_tokens": -1, # Cost is undefined/irrelevant here
+                "number_of_unknown_tokens": -1,
+                "unknown_tokens_in_sentence": "",
+                "tokenized_sentence_surface": ', '.join(tokenized_sentences.get(word, [])),
                 "reading": reading_map.get(word, ""),
-                "meaning": meaning_map.get(word, "")
+                "meaning": meaning_map.get(word, ""),
             })
             unprocessed_count += 1
 
@@ -417,8 +433,10 @@ def save_comparison_csv(
     try:
         # Define final columns in desired order
         final_columns = [
-            'word', 'sentence', 'original_index', 'optimal_index',
-            'number_of_unknown_tokens', 'reading', 'meaning'
+            'word', 'sentence', 'jlpt_level', 'original_index', 'optimal_index',
+            'number_of_unknown_tokens', 'unknown_tokens_in_sentence', 
+            'tokenized_sentence_surface', 
+            'reading', 'meaning'
         ]
         results_df = pd.DataFrame(results_data, columns=final_columns)
 
@@ -476,16 +494,6 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
         costs.append(cost)
         known_plot.add(word) # Add after cost calculation
 
-    # --- Save cost data --- 
-    data_filename = "cognitive_load_data.csv"
-    print(f"Saving cognitive load data to {data_filename}...")
-    try:
-        cost_df = pd.DataFrame({'step': range(len(costs)), 'cost': costs})
-        cost_df.to_csv(data_filename, index=False)
-        print("Cognitive load data saved successfully.")
-    except Exception as e:
-        print(f"Error saving cognitive load data: {e}", file=sys.stderr)
-    # ----------------------
 
     if not plt: # Check if plotting is possible
         print("Matplotlib not found. Skipping plot generation.")
@@ -553,9 +561,10 @@ def main():
     # 1. Load Vocabulary
     vocab_df = load_vocabulary(BASE_URL, LEVELS, VOCAB_COLUMN)
     original_vocab_list = list(vocab_df[VOCAB_COLUMN])
-    # Create lookup maps for reading and meaning
+    # Create lookup maps for reading, meaning, and level
     reading_map = pd.Series(vocab_df.reading.values, index=vocab_df[VOCAB_COLUMN]).to_dict()
     meaning_map = pd.Series(vocab_df.meaning.values, index=vocab_df[VOCAB_COLUMN]).to_dict()
+    level_map = pd.Series(vocab_df.jlpt_level.values, index=vocab_df[VOCAB_COLUMN]).to_dict() # Add level map
 
     # 2. Generate Sentences
     # generator = NaiveSentenceGenerator()
@@ -567,18 +576,34 @@ def main():
 
     sentences = generate_all_sentences(original_vocab_list, generator, sentence_cache)
 
-    # --- Pre-tokenize all sentences --- 
+    # --- Pre-tokenize all sentences (surface forms only) --- 
     print("Tokenizing all generated sentences...")
-    tokenized_sentences = {word: tokenize(sent) for word, sent in tqdm(sentences.items()) if sent}
+    tokenized_sentences = {} # word -> [surface1, surface2, ...]
+    # tagged_sentences = {}    # word -> [(surface1, pos1), (surface2, pos2), ...] # REMOVED
+    # Use tqdm directly on items if available
+    items_iterator = tqdm(sentences.items()) if tqdm else sentences.items()
+    for word, sent in items_iterator:
+        if sent:
+            try:
+                # Only need surface forms now
+                tokenized_sentences[word] = tokenize(sent)
+                # tagged_sentences[word] = [(token.surface, token.pos) for token in tagger(sent)] # REMOVED
+            except Exception as e:
+                 print(f"Error tokenizing sentence for '{word}': {sent}. Error: {e}", file=sys.stderr)
+                 tokenized_sentences[word] = []
+                 # tagged_sentences[word] = [] # REMOVED
+        else:
+            tokenized_sentences[word] = []
+            # tagged_sentences[word] = [] # REMOVED
     print(f"Tokenized {len(tokenized_sentences)} sentences.")
-    # -----------------------------------
+    # ------------------------------------------------------
 
-    # 3. Build Dependency Graph (pass tokenized sentences)
-    dependency_graph = build_dependency_graph(original_vocab_list, sentences, SEED_WORDS, tokenized_sentences) # Pass tokenized
+    # 3. Build Dependency Graph (pass tokenized surface forms)
+    dependency_graph = build_dependency_graph(original_vocab_list, sentences, SEED_WORDS, tokenized_sentences) # Pass surface tokenized
 
-    # 4. Find Optimal Order (pass tokenized sentences)
+    # 4. Find Optimal Order (pass tokenized surface forms and original index map)
     original_index_map = {word: i for i, word in enumerate(original_vocab_list)}
-    optimal_vocab_list = find_min_surprise_order(original_vocab_list, sentences, dependency_graph, SEED_WORDS, tokenized_sentences, original_index_map) # Pass tokenized and original index map
+    optimal_vocab_list = find_min_surprise_order(original_vocab_list, sentences, dependency_graph, SEED_WORDS, tokenized_sentences, original_index_map) # Pass surface tokenized and original index map
 
     # 5. Analyze and Save Results
     analyze_order_similarity(original_vocab_list, optimal_vocab_list)
@@ -587,14 +612,16 @@ def main():
         original_vocab_list,
         optimal_vocab_list,
         sentences,
-        reading_map,      # Pass map
-        meaning_map,      # Pass map
-        tokenized_sentences, # Pass tokenized
-        SEED_WORDS        # Pass seeds
+        reading_map,
+        meaning_map,
+        level_map,
+        tokenized_sentences,
+        # tagged_sentences,    # REMOVED
+        SEED_WORDS
     )
 
-    # 6. Plot (Optional) (pass tokenized sentences)
-    plot_cognitive_load(optimal_vocab_list, sentences, SEED_WORDS, tokenized_sentences) # Pass tokenized
+    # 6. Plot (Optional) (pass tokenized surface forms)
+    plot_cognitive_load(optimal_vocab_list, sentences, SEED_WORDS, tokenized_sentences) # Pass surface tokenized
 
 if __name__ == "__main__":
     main() 
