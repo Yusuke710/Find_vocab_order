@@ -258,7 +258,8 @@ def build_dependency_graph(vocab_list: list[str], sentences_map: dict[str, str],
 
 # ---------------- 4. Optimal Ordering Algorithm ----------------
 def find_min_surprise_order(words_to_order: list[str], sentences_map: dict[str, str], prereq_graph: nx.DiGraph, seed_vocab: set[str], tokenized_sentences: dict[str, list[str]]) -> list[str]:
-    """Performs a topological sort, prioritizing words whose sentences introduce fewest new tokens.
+    """Performs a sort prioritizing words whose sentences introduce fewest new tokens,
+    ensuring words are added once all prerequisites (including seeds) are met.
 
     Args:
         words_to_order: List of vocabulary words to sort.
@@ -272,54 +273,72 @@ def find_min_surprise_order(words_to_order: list[str], sentences_map: dict[str, 
         A list of words from words_to_order in the calculated optimal order.
     """
     print("Sorting words by minimum surprise...")
-    in_degree = defaultdict(int)
+    # Build adjacency list (successors): u -> list of v where (u, v) is an edge
     adj_list = defaultdict(list)
-    words_set = set(words_to_order)
-
-    # Calculate in-degree based *only* on dependencies within the 'words_to_order' list
     for u, v in prereq_graph.edges:
-        if v in words_set:
-            # Build adjacency list for graph traversal (all edges needed for progression)
+        # We only care about successors that are actually in the list we need to order
+        if v in words_to_order:
             adj_list[u].append(v)
-            # Increment in-degree only if the source 'u' is also in the vocab list
-            if u in words_set:
-                in_degree[v] += 1
 
     current_known = set(seed_vocab)
     optimal_order = []
-    # Initialize queue with words having 0 in-degree *from other vocab words*
-    queue = deque([w for w in words_to_order if in_degree[w] == 0])
+    words_remaining = set(words_to_order) # Keep track of words not yet ordered
+    queue = deque() # Words whose prerequisites are met
+
+    # --- Initial Queue Population ---
+    # Find words whose prerequisites are *already* fully met by seed_vocab
+    print("Initializing queue with words learnable from seeds...")
+    initially_learnable = []
+    for word in words_to_order:
+        # Get all predecessors that are actually in the graph
+        prereqs = {p for p in prereq_graph.predecessors(word) if prereq_graph.has_node(p)}
+        # Check if all prerequisites are within the initial seed set
+        if prereqs.issubset(seed_vocab):
+            initially_learnable.append(word)
+
+    for word in initially_learnable:
+        queue.append(word)
+        if word in words_remaining: # Avoid removing if somehow not there
+             words_remaining.remove(word)
+    print(f"Initialized queue with {len(queue)} words.")
+    # --------------------------------
 
     num_words = len(words_to_order)
     pbar = tqdm(total=num_words) if tqdm else None
 
     while queue:
-        if not queue:
-            break
-
         # Find word in queue whose sentence adds the fewest unknown tokens
+        # Use pre-tokenized sentences here for cost calculation
         best_word = min(
             queue,
-            # Use pre-tokenized sentences here for cost calculation
             key=lambda w: sum(token not in current_known for token in tokenized_sentences.get(w, []))
         )
 
         queue.remove(best_word)
         optimal_order.append(best_word)
-        current_known.add(best_word)
+        current_known.add(best_word) # Add the newly learned word
+        # words_remaining should already have 'best_word' removed when added to queue
+
         if pbar: pbar.update(1)
 
-        # Update in-degrees of neighbors
-        for neighbor in adj_list[best_word]:
-            if neighbor in words_set:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
+        # --- Update Neighbors ---
+        # Check words that depend on best_word (its successors)
+        for neighbor in adj_list.get(best_word, []):
+            if neighbor in words_remaining: # Only check words not yet ordered/queued
+                # Get all predecessors that are actually in the graph
+                neighbor_prereqs = {p for p in prereq_graph.predecessors(neighbor) if prereq_graph.has_node(p)}
+                # Check if *all* prerequisites for this neighbor are now known
+                if neighbor_prereqs.issubset(current_known):
                     queue.append(neighbor)
+                    words_remaining.remove(neighbor) # Remove from remaining *now*
+        # ----------------------
 
     if pbar: pbar.close()
 
     if len(optimal_order) != num_words:
-        print(f"Warning: Output order ({len(optimal_order)}) doesn't match input size ({num_words}). May indicate cycles or disconnected components.", file=sys.stderr)
+        print(f"Warning: Output order ({len(optimal_order)}) doesn't match input size ({num_words}). {len(words_remaining)} words could not be ordered. This may indicate cycles involving only unordered words, or words whose prerequisite sentences failed/were empty.", file=sys.stderr)
+        # Optionally: list the remaining words
+        # print(f"Unordered words: {words_remaining}")
 
     print(f"Sorted {len(optimal_order)} words.")
     return optimal_order
