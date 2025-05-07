@@ -20,6 +20,7 @@ import sys
 from collections import defaultdict, deque
 from abc import ABC, abstractmethod
 import os
+from typing import Tuple # Added for type hinting
 
 # Third-party imports
 import networkx as nx
@@ -49,32 +50,12 @@ except ImportError:
 # ---------------- Constants & Configuration ----------------
 VOCAB_COLUMN = "expression" # Column name in CSV containing the vocabulary word
 BASE_URL = "https://raw.githubusercontent.com/elzup/jlpt-word-list/master/src/"
-LEVELS = ["n5.csv", "n4.csv", "n3.csv", "n2.csv", "n1.csv"] # Add more levels if needed
-SEED_WORDS_FILE_PATH = "seed_words.txt" # Path to the seed words file
+LEVELS = ["n5.csv", "n4.csv", "n3.csv", "n2.csv", "n1.csv"] # Ensure N5 is present to be used as seeds
 OUTPUT_CSV_PATH = "vocab_order_comparison.csv"
 SENTENCE_CACHE_CSV_PATH = "sentence_cache.csv" # New path for sentence cache
 
 # Initialize tokenizer globally (or pass it around if preferred)
 tagger = fugashi.Tagger()
-
-def load_seed_words(file_path: str) -> set[str]:
-    """Loads seed words from a text file, one word per line."""
-    seed_words = set()
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                word = line.strip()
-                if word: # Ignore empty lines
-                    seed_words.add(word)
-        if not seed_words and os.path.exists(file_path): # File exists but is empty or only whitespace
-            print(f"Warning: No seed words loaded from '{file_path}'. The file might be empty.", file=sys.stderr)
-        elif seed_words:
-            print(f"Loaded {len(seed_words)} seed words from '{file_path}'.")
-    except FileNotFoundError:
-        print(f"Warning: Seed words file '{file_path}' not found. Proceeding without file-loaded seed words.", file=sys.stderr)
-    except Exception as e:
-        print(f"Error loading seed words from '{file_path}': {e}", file=sys.stderr)
-    return seed_words
 
 def tokenize(text: str) -> list[str]:
     """Tokenizes Japanese text using fugashi."""
@@ -82,10 +63,18 @@ def tokenize(text: str) -> list[str]:
     return [token.surface for token in tagger(text)]
 
 # ---------------- 1. Data Loading ----------------
-def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.DataFrame:
-    """Loads vocabulary lists, adds level info, keeps essential columns, and removes duplicates."""
+def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> Tuple[pd.DataFrame, set[str]]:
+    """Loads vocabulary lists, adds level info, keeps essential columns,
+    removes duplicates, and returns the full DataFrame and the set of N5 words.
+
+    Returns:
+        A tuple containing:
+        - vocab_df: DataFrame with all unique vocabulary words.
+        - n5_words: Set of words from the N5 level.
+    """
     print(f"Loading vocabulary from {len(levels)} levels...")
     dfs = []
+    n5_words_list = [] # List to collect N5 words before deduplication
     required_cols = {vocab_col, 'reading', 'meaning'} # Columns we need
 
     for level_file in levels:
@@ -108,6 +97,11 @@ def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.Data
             # Select only the columns we need (including the new level)
             cols_to_keep = list(required_cols) + ['jlpt_level']
             dfs.append(df[cols_to_keep])
+
+            # --- Extract N5 words before deduplication --- 
+            if level_name == 'N5' and vocab_col in df.columns:
+                n5_words_list.extend(df[vocab_col].astype(str).tolist()) # Add all N5 words from this file
+            # ---------------------------------------------
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching {url}: {e}", file=sys.stderr)
@@ -132,8 +126,12 @@ def load_vocabulary(base_url: str, levels: list[str], vocab_col: str) -> pd.Data
     vocab_df['meaning'] = vocab_df['meaning'].fillna('').astype(str)
     vocab_df['jlpt_level'] = vocab_df['jlpt_level'].fillna('Unknown').astype(str) # Handle potential rare cases
 
+    # Create the final set of unique N5 words
+    n5_words = set(n5_words_list)
+
     print(f"Loaded {len(vocab_df)} unique words with reading, meaning, and level.")
-    return vocab_df
+    print(f"Extracted {len(n5_words)} N5 words to be used as seeds.")
+    return vocab_df, n5_words
 
 # ---------------- 2. Sentence Generation ----------------
 class SentenceGenerator(ABC):
@@ -251,29 +249,42 @@ def generate_all_sentences(vocab_list: list[str], generator: SentenceGenerator, 
     return sentences
 
 # ---------------- 3. Dependency Graph Building ----------------
-def build_dependency_graph(vocab_list: list[str], sentences_map: dict[str, str], seed_words: set[str], tokenized_sentences: dict[str, list[str]]) -> nx.DiGraph:
-    """Builds a directed graph where edges represent word prerequisites."""
+def build_dependency_graph(words_to_order: list[str], seed_words: set[str], tokenized_sentences: dict[str, list[str]]) -> nx.DiGraph:
+    """Builds a directed graph where edges represent word prerequisites.
+
+    Args:
+        words_to_order: List of words to be included in the graph (excluding seeds).
+        seed_words: Set of initial seed words.
+        tokenized_sentences: Dictionary mapping words to their tokenized sentences.
+
+    Returns:
+        A directed graph.
+    """
     print("Building dependency graph...")
     graph = nx.DiGraph()
-    known_words = set(seed_words)
+    # Start with known words = seeds
+    known_words_for_graph = set(seed_words)
 
-    # Add all potential nodes first to handle disconnected ones
-    all_nodes = set(vocab_list).union(seed_words)
+    # Add all potential nodes first (seeds + words to order)
+    all_nodes = set(words_to_order).union(seed_words)
     graph.add_nodes_from(all_nodes)
 
-    iterator = tqdm(vocab_list) if tqdm else vocab_list
+    # Iterate only through the words we need to order
+    iterator = tqdm(words_to_order) if tqdm else words_to_order
     for word in iterator:
-        # sentence = sentences_map.get(word) # No longer needed directly
         tokens = tokenized_sentences.get(word) # Use pre-tokenized list
         if not tokens: continue # Skip if no tokens (empty/failed sentence)
 
-        dependencies = {token for token in tokens if token in known_words and graph.has_node(token)} # Ensure dependency is a node
+        # Find dependencies within the current set of known words (including seeds and previously added words_to_order)
+        # Only add edges from nodes that actually exist in our graph (all_nodes)
+        dependencies = {token for token in tokens if token in known_words_for_graph and token in all_nodes}
 
         for dep in dependencies:
             if dep != word: # Avoid self-loops
                 graph.add_edge(dep, word) # Edge: prerequisite -> new word
 
-        known_words.add(word) # Add the new word itself to known set *after* processing its deps for this pass
+        # Add the new word itself to known set *after* processing its deps
+        known_words_for_graph.add(word)
 
     print(f"Graph built with {graph.number_of_nodes()} nodes and {graph.number_of_edges()} edges.")
     return graph
@@ -518,19 +529,19 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
         cumulative_costs.append(current_sum)
     # -----------------------------------------
 
-    # --- Save Cumulative Cognitive Load Data (Kanji-based) --- DELETED
-    # if cumulative_costs_kanji:
-    #     cumulative_df = pd.DataFrame({
-    #         'learning_step': range(1, len(cumulative_costs_kanji) + 1),
-    #         'cumulative_kanji_cognitive_load': cumulative_costs_kanji # Renamed field
-    #     })
-    #     cumulative_csv_filename = "cumulative_kanji_cognitive_load_data.csv" # Renamed file
-    #     try:
-    #         print(f"Saving cumulative Kanji-based cognitive load data to {cumulative_csv_filename}...")
-    #         cumulative_df.to_csv(cumulative_csv_filename, index=False)
-    #         print("Cumulative Kanji-based cognitive load data saved successfully.")
-    #     except Exception as e:
-    #         print(f"Error saving cumulative Kanji-based cognitive load data: {e}", file=sys.stderr)
+    # --- Save Cumulative Cognitive Load Data ---
+    if cumulative_costs:
+        cumulative_df = pd.DataFrame({
+            'learning_step': range(1, len(cumulative_costs) + 1),
+            'cumulative_cognitive_load': cumulative_costs
+        })
+        cumulative_csv_filename = "cumulative_cognitive_load_data.csv"
+        try:
+            print(f"Saving cumulative cognitive load data to {cumulative_csv_filename}...")
+            cumulative_df.to_csv(cumulative_csv_filename, index=False)
+            print("Cumulative cognitive load data saved successfully.")
+        except Exception as e:
+            print(f"Error saving cumulative cognitive load data: {e}", file=sys.stderr)
     # -----------------------------------------
 
     if not plt: # Check if plotting is possible
@@ -548,7 +559,7 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
     try:
         print(f"Saving per-step cognitive load plot to {plot_filename}...")
         plt.savefig(plot_filename)
-        print(f"Per-step cognitive load plot saved to {plot_filename}.")
+        print(f"Per-step cognitive load plot saved to {plot_filename}.") # Added confirmation
     except Exception as e:
         print(f"Error saving per-step plot: {e}", file=sys.stderr)
     plt.close() # Close the per-step plot figure
@@ -566,7 +577,7 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
         try:
             print(f"Saving cumulative cognitive load plot to {cumulative_plot_filename}...")
             plt.savefig(cumulative_plot_filename)
-            print(f"Cumulative cognitive load plot saved to {cumulative_plot_filename}.")
+            print(f"Cumulative cognitive load plot saved to {cumulative_plot_filename}.") # Added confirmation
         except Exception as e:
             print(f"Error saving cumulative plot: {e}", file=sys.stderr)
         plt.close() # Close the cumulative plot figure
@@ -591,7 +602,7 @@ def main():
         sys.exit(1)
     # ---------------------------------------------
 
-    # --- Load Existing Sentences Cache --- 
+    # --- Load Existing Sentences Cache (Conditional Update) ---
     sentence_cache = {}
     if os.path.exists(SENTENCE_CACHE_CSV_PATH): # Use new cache path
         print(f"Loading existing sentences from {SENTENCE_CACHE_CSV_PATH}...")
@@ -611,15 +622,16 @@ def main():
         print(f"No existing sentence cache file found at {SENTENCE_CACHE_CSV_PATH}.")
     # ---------------------------------------
 
-    # --- Load Seed Words from File ---
-    current_seed_words = load_seed_words(SEED_WORDS_FILE_PATH)
-    if not current_seed_words:
-        print("Proceeding with an empty set of seed words. This may affect the ordering significantly.", file=sys.stderr)
-    # ---------------------------------
-
-    # 1. Load Vocabulary
-    vocab_df = load_vocabulary(BASE_URL, LEVELS, VOCAB_COLUMN)
+    # 1. Load Vocabulary and N5 Seed Words
+    vocab_df, n5_seed_words = load_vocabulary(BASE_URL, LEVELS, VOCAB_COLUMN) # Capture N5 words to use as seeds
     original_vocab_list = list(vocab_df[VOCAB_COLUMN])
+
+    if not n5_seed_words:
+        print("Warning: No N5 words were loaded to be used as seeds. This might be because 'n5.csv' is not in LEVELS or the N5 file was empty/not found. Proceeding with an empty seed set.", file=sys.stderr)
+
+    # Filter original list to exclude N5 seed words
+    words_to_actually_order = [w for w in original_vocab_list if w not in n5_seed_words]
+
     # Create lookup maps for reading, meaning, and level
     reading_map = pd.Series(vocab_df.reading.values, index=vocab_df[VOCAB_COLUMN]).to_dict()
     meaning_map = pd.Series(vocab_df.meaning.values, index=vocab_df[VOCAB_COLUMN]).to_dict()
@@ -633,19 +645,46 @@ def main():
          print("LLM Generator failed to initialize. Exiting.", file=sys.stderr)
          sys.exit(1)
 
-    sentences = generate_all_sentences(original_vocab_list, generator, sentence_cache)
+    sentences = generate_all_sentences(words_to_actually_order, generator, sentence_cache)
 
-    # --- Save Updated Sentences to Cache ---
-    if sentences:
-        print(f"Saving updated sentence cache to {SENTENCE_CACHE_CSV_PATH}...")
+    # --- Save Updated Sentences to Cache (Conditional Update) ---
+    newly_generated_or_updated_items = []
+    for word, current_sentence in sentences.items():
+        if current_sentence: # Only consider non-empty generated sentences
+            # If word wasn't in initial cache, or was in cache but empty, it's new/updated
+            if word not in sentence_cache or not sentence_cache.get(word):
+                newly_generated_or_updated_items.append({'word': word, 'sentence': current_sentence})
+
+    if newly_generated_or_updated_items:
+        print(f"Found {len(newly_generated_or_updated_items)} new/updated sentences to add to cache at {SENTENCE_CACHE_CSV_PATH}...")
+        new_sentences_df = pd.DataFrame(newly_generated_or_updated_items)
+        
+        final_df_to_save = new_sentences_df
+        if os.path.exists(SENTENCE_CACHE_CSV_PATH):
+            try:
+                existing_cache_df = pd.read_csv(SENTENCE_CACHE_CSV_PATH)
+                # Ensure columns are consistent for concatenation, especially if existing_cache_df is empty
+                if not existing_cache_df.empty and not all(col in existing_cache_df.columns for col in ['word', 'sentence']):
+                    print(f"Warning: Existing cache file {SENTENCE_CACHE_CSV_PATH} has unexpected columns. Overwriting with new sentences.", file=sys.stderr)
+                elif not existing_cache_df.empty:
+                    combined_df = pd.concat([existing_cache_df, new_sentences_df], ignore_index=True)
+                    final_df_to_save = combined_df.drop_duplicates(subset=['word'], keep='last').reset_index(drop=True)
+                # If existing_cache_df is empty or had wrong columns, final_df_to_save is already new_sentences_df
+            except pd.errors.EmptyDataError:
+                print(f"Existing cache file {SENTENCE_CACHE_CSV_PATH} is empty. Initializing with new sentences.")
+                # final_df_to_save is already new_sentences_df
+            except Exception as e:
+                print(f"Error reading existing cache file {SENTENCE_CACHE_CSV_PATH}: {e}. Overwriting with new sentences.", file=sys.stderr)
+                # final_df_to_save is already new_sentences_df
+
         try:
-            # Create DataFrame from sentences dictionary
-            sentence_df_to_save = pd.DataFrame(list(sentences.items()), columns=['word', 'sentence'])
-            sentence_df_to_save.to_csv(SENTENCE_CACHE_CSV_PATH, index=False, encoding='utf-8-sig')
-            print(f"Saved {len(sentence_df_to_save)} sentences to cache at {SENTENCE_CACHE_CSV_PATH}.")
+            final_df_to_save.to_csv(SENTENCE_CACHE_CSV_PATH, index=False, encoding='utf-8-sig')
+            print(f"Saved {len(final_df_to_save)} total sentences to cache at {SENTENCE_CACHE_CSV_PATH}.")
         except Exception as e:
             print(f"Error saving sentence cache to {SENTENCE_CACHE_CSV_PATH}: {e}", file=sys.stderr)
-    # ---------------------------------------
+    else:
+        print(f"Sentence cache at {SENTENCE_CACHE_CSV_PATH} is already up-to-date. No new sentences generated.")
+    # ----------------------------------------------------------------
 
     # --- Pre-tokenize all sentences (surface forms only) --- 
     print("Tokenizing all generated sentences...")
@@ -669,30 +708,31 @@ def main():
     print(f"Tokenized {len(tokenized_sentences)} sentences.")
     # ------------------------------------------------------
 
-    # 3. Build Dependency Graph (pass tokenized surface forms)
-    dependency_graph = build_dependency_graph(original_vocab_list, sentences, current_seed_words, tokenized_sentences) # Pass surface tokenized
+    # 3. Build Dependency Graph (pass only words_to_order, N5 seeds, and their tokenized sentences)
+    dependency_graph = build_dependency_graph(words_to_actually_order, n5_seed_words, tokenized_sentences)
 
-    # 4. Find Optimal Order (pass tokenized surface forms and original index map)
+    # 4. Find Optimal Order (pass tokenized surface forms, N5 seeds, and original index map)
+    # Note: words_to_actually_order ensures we don't try to order the N5 seeds themselves
     original_index_map = {word: i for i, word in enumerate(original_vocab_list)}
-    optimal_vocab_list = find_min_surprise_order(original_vocab_list, sentences, dependency_graph, current_seed_words, tokenized_sentences, original_index_map) # Pass surface tokenized and original index map
+    optimal_vocab_list = find_min_surprise_order(words_to_actually_order, sentences, dependency_graph, n5_seed_words, tokenized_sentences, original_index_map)
 
     # 5. Analyze and Save Results
-    analyze_order_similarity(original_vocab_list, optimal_vocab_list)
+    # Pass the original list for reporting, but optimal list excludes N5 seeds
+    analyze_order_similarity(original_vocab_list, optimal_vocab_list) # Compare against original
     save_comparison_csv(
         OUTPUT_CSV_PATH,
-        original_vocab_list,
-        optimal_vocab_list,
+        original_vocab_list, # Full original list for context
+        optimal_vocab_list,  # The ordered list (excluding N5 seeds)
         sentences,
         reading_map,
         meaning_map,
         level_map,
         tokenized_sentences,
-        # tagged_sentences,    # REMOVED
-        current_seed_words
+        n5_seed_words # Pass N5 seeds
     )
 
-    # 6. Plot (Optional) (pass tokenized surface forms)
-    plot_cognitive_load(optimal_vocab_list, sentences, current_seed_words, tokenized_sentences) # Pass surface tokenized
+    # 6. Plot (Optional) (pass tokenized surface forms and N5 seeds)
+    plot_cognitive_load(optimal_vocab_list, sentences, n5_seed_words, tokenized_sentences)
 
 if __name__ == "__main__":
     main() 
