@@ -77,7 +77,6 @@ The script aims to find a learning order for a given vocabulary list that minimi
         *   This "best" word is added to the `optimal_order` list and the set of known words.
         *   The algorithm then checks all vocabulary words that have the newly learned word as a prerequisite (its successors in the graph). For each successor, it checks if *all* of its prerequisites are now in the known set. If so, the successor is added to the queue, making it a candidate for the next learning step.
     *   **Output**: This process continues until the queue is empty, resulting in the `optimal_vocab_list`.
-    *   **Handling Unorderable Words**: Words from the input vocabulary whose prerequisites are never met (e.g., due to being in disconnected parts of the dependency graph not reachable from the `SEED_WORDS` via the chain of learnable words, or being part of cycles of mutually dependent but unlearnable words) will not be included in the `optimal_vocab_list`. In the final `vocab_order_comparison.csv` output, these words are still listed but are marked with an `optimal_index` of -1 and a `number_of_unknown_tokens` (cost) of -1.
 6.  **Analysis & Output**:
     *   Compares the `optimal_vocab_list` to the original list, calculating Kendall's Tau for rank correlation (if `scipy` is installed).
     *   Saves detailed results and comparisons to CSV files.
@@ -90,9 +89,6 @@ The script generates the following key files in the project's root directory:
 *   `vocab_order_comparison.csv`: Detailed comparison of original vs. optimal order, including sentences, costs, and token information.
 *   `sentence_cache.csv`: Cache of LLM-generated sentences to speed up subsequent runs.
 *   `cognitive_load_plot.png`: (Optional) Plot showing the number of unknown words per sentence in the optimal order.
-*   `cumulative_cognitive_load_plot.png`: (Optional) Plot showing the cumulative number of unknown words throughout the optimal learning sequence.
-*   `cognitive_load_data.csv`: (Optional) Data for the cognitive load plot.
-*   `cumulative_cognitive_load_data.csv`: (Optional) Data for the cumulative cognitive load plot.
 
 ## Configuration
 
