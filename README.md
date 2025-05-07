@@ -1,69 +1,102 @@
-# JLPT Vocabulary Minimum Surprise Ordering
+# JLPT Vocabulary Ordering via Greedy Min Surprise Topological Sort
 
 ## Project Goal
 
-This project aims to find an optimized learning order for Japanese Language Proficiency Test (JLPT) N5 and N4 vocabulary. The optimization strategy is based on a "minimum surprise" principle: at each step, introduce the word whose example sentence contains the fewest *unknown* tokens, leveraging previously learned vocabulary. The goal is to create a smoother learning curve by minimizing cognitive load.
+This project aims to find an optimized learning order for Japanese Language Proficiency Test (JLPT) N5 to N1 vocabulary. The optimization strategy is based on a "minimum surprise" principle: at each step, introduce the word whose example sentence contains the fewest *unknown* tokens, leveraging previously learned vocabulary. The goal is to create a smoother learning curve by minimizing cognitive load.
 
-## Process Overview
+## How to Run
 
-1.  **Fetch Vocabulary:** Download raw JLPT N5 and N4 vocabulary lists (CSV format) from the [elzup/jlpt-word-list](https://github.com/elzup/jlpt-word-list) GitHub repository.
-2.  **Generate Sentences:** For each vocabulary word, automatically generate a simple example sentence. (Current implementation uses basic templates).
-3.  **Build Dependency Graph:** Construct a directed acyclic graph (DAG) where nodes are vocabulary words (plus a set of predefined `SEED_WORDS`). An edge exists from word `A` to word `B` if word `A` appears in the example sentence generated for word `B`.
-4.  **Topological Sort (Min-Surprise):** Perform a modified topological sort on the graph. Prioritize nodes (words) with an in-degree of zero (relative to other vocabulary words). Among these candidates, select the word whose sentence introduces the minimum number of tokens not yet encountered (i.e., not in `SEED_WORDS` or previously selected words).
-5.  **Output Results:**
-    *   Generate a CSV file (`vocab_order_comparison.csv`) comparing the original vocabulary order with the newly calculated optimal order. This file includes the word, its generated sentence, its original index, and its optimal index.
-    *   Print key statistics and comparisons to the console.
-    *   Optionally, display a plot visualizing the "cognitive load" (number of unknown tokens per sentence) at each step of the optimal order using `matplotlib`.
+### Prerequisites
 
-## Minimum Surprise Sorting Algorithm
+*   Python 3.x
+*   A Gemini API Key (for sentence generation)
 
-The core of the optimization lies in a greedy algorithm that aims to minimize the introduction of unknown words at each step:
+### Setup
 
-1.  **Initialization:**
-    *   Start with a set of `known_words` containing only the predefined `SEED_WORDS`.
-    *   Identify an initial `queue` of candidate vocabulary words. These are words whose generated sentences *only* contain dependencies found within the `SEED_WORDS` (i.e., they have an in-degree of 0 when considering dependencies *only* from other vocabulary words, not seeds).
-2.  **Iteration:**
-    *   While the `queue` of candidate words is not empty:
-        *   **Calculate Cost:** For each `word` in the `queue`, calculate its "surprise cost". This cost is the number of tokens in the `word`'s generated sentence that are *not* currently in the `known_words` set.
-        *   **Select Best:** Choose the `best_word` from the `queue` that has the minimum surprise cost. (Tie-breaking defaults to the order words appeared in the queue).
-        *   **Update:**
-            *   Remove `best_word` from the `queue`.
-            *   Append `best_word` to the `optimal_order` list.
-            *   Add `best_word` to the `known_words` set.
-            *   **Unlock Neighbors:** For any other vocabulary word (`neighbor`) that had `best_word` as a prerequisite, decrease its count of unmet prerequisites. If a `neighbor`'s count reaches zero, add it to the `queue` as it is now available to be selected.
-3.  **Termination:** The loop continues until the `queue` is empty, meaning no more words can be placed according to the dependency rules.
+1.  **Clone the Repository:**
+    ```bash
+    git clone https://github.com/Yusuke710/Find_vocab_order.git
+    cd https://github.com/Yusuke710/Find_vocab_order.git
+    ```
 
-This process ensures that, at each step, the word chosen is the one predicted to be easiest to understand based on the vocabulary learned so far.
+2.  **Install Dependencies:**
+    It's recommended to use a virtual environment. You can create and activate one using `uv`:
+    ```bash
+    uv sync
+    . .venv/bin/activate
+    ```
+    The script requires the following Python libraries:
+    *   `pandas`
+    *   `requests`
+    *   `fugashi`
+    *   `unidic-lite` (or another UniDic dictionary for `fugashi`)
+    *   `networkx`
+    *   `google-generativeai` (for LLM-based sentence generation)
+    *   `python-dotenv` (for managing API keys)
+    *   `matplotlib` (for plotting)
+    *   `scipy` (for Kendall's Tau rank correlation)
+    *   `tqdm` (for progress bars)
 
-## Current Implementation
+3.  **Set up Gemini API Key:**
+    Create a file named `.env` in the root directory of the project and add your Gemini API key:
+    ```
+    GEMINI_API_KEY=YOUR_API_KEY_HERE
+    ```
 
-*   **Script:** `jlpt_order_min_surprise.py`
-*   **Language:** Python 3
-*   **Core Libraries:**
-    *   `pandas`: Data manipulation (loading CSVs, creating DataFrames).
-    *   `requests`: Fetching vocabulary lists from URLs.
-    *   `fugashi` / `unidic-lite`: Japanese word tokenization.
-    *   `networkx`: Building and analyzing the dependency graph.
-*   **Optional Libraries:**
-    *   `matplotlib`: Plotting the cognitive load curve.
-    *   `scipy`: Calculating Kendall's Tau rank correlation for order comparison.
-    *   `tqdm`: Displaying progress bars for long operations.
-*   **Structure:** The code is refactored into functions and classes for modularity (loading, sentence generation, graph building, sorting, analysis, saving, plotting) orchestrated by a `main()` function.
-*   **Sentence Generation:** Currently uses a `NaiveSentenceGenerator` class with very basic templates based on word endings (い-adjectives, る/う-verbs, nouns).
-*   **Output File:** `vocab_order_comparison.csv`
+4.  **Prepare Seed Words:**
+    Create a file named `seed_words.txt` in the root directory. Add one Japanese seed word per line. These are words assumed to be known from the start. Example:
+    ```
+    私
+    は
+    です
+    ます
+    ```
+    If this file is not present or is empty, the script will run with no initial seed words (which might affect the ordering quality).
 
-## Findings & Observations
+### Running the Script
 
-*   The script successfully generates an alternative vocabulary order aiming to minimize surprise.
-*   **Tie-Breaking Behavior:** When multiple words have the same minimum cost (number of new tokens in their sentence), the default `min()` function behavior leads to selection based on the order in the queue. This results in clusters of similar words (e.g., い-adjectives) appearing in Japanese alphabetical order in the initial part of the "optimal" list, as they often share the same low cost initially.
-*   **Rank Correlation:** Kendall's Tau rank correlation between the original and optimal order is typically around 0.7, indicating a significant reordering but retaining some similarity to the original sequence.
-*   **Incomplete Ordering:** The script currently prints a warning as not all words from the input lists (~222 out of ~1373) are included in the final `optimal_order`. These words are marked with an `optimal_index` of -1 in the output CSV. This is likely due to cycles in the dependency graph (which can happen with simple templates) or words whose sentences contain *only* tokens not reachable from the `SEED_WORDS` via the generated dependencies (disconnected components).
+Execute the main script from the project's root directory:
+```bash
+python vocab_order_min_surprise.py
+```
 
-## Potential Future Directions
+## Methodology
 
-*   **LLM Sentence Generation:** Implement an `LLMSentenceGenerator` class (inheriting from `SentenceGenerator`) to create more realistic and varied example sentences, potentially leading to more nuanced dependency costs and better ordering.
-*   **Improved Tie-Breaking:** Modify the `find_min_surprise_order` function to use a secondary key for tie-breaking when costs are equal (e.g., prioritize words that unlock more future words, or use a random shuffle).
-*   **Investigate Disconnected Components/Cycles:** Analyze the dependency graph further to understand why some words are not included in the final order and refine the `SEED_WORDS` or sentence generation logic accordingly.
-*   **Refine SEED_WORDS:** Expand the `SEED_WORDS` set with more common grammatical components or high-frequency words.
-*   **POS Tagging for Templates:** Enhance the `NaiveSentenceGenerator` to use Part-of-Speech tagging (available via `fugashi`) to select more appropriate sentence templates.
-*   **Configuration:** Move settings like `LEVELS`, `SEED_WORDS`, etc., to a separate configuration file or command-line arguments.
+The script aims to find a learning order for a given vocabulary list that minimizes "cognitive load" or "surprise" at each step. The core idea is to introduce new words whose example sentences contain the fewest *unknown* words at that point in the learning sequence.
+
+1.  **Data Loading**: Loads vocabulary (word, reading, meaning, JLPT level) from the [elzup/jlpt-word-list](https://github.com/elzup/jlpt-word-list) repository (N5-N1 levels by default).
+2.  **Sentence Generation**: For each vocabulary word, it generates a simple, common example sentence.
+    *   Uses the Gemini LLM (`gemini-2.0-flash` by default) via the Google Generative AI SDK.
+    *   Generated sentences are cached in `sentence_cache.csv` to avoid redundant API calls across runs. This file is loaded at the start and updated after sentence generation.
+3.  **Tokenization**: Uses `fugashi` with `unidic-lite` to tokenize all generated sentences into individual words/tokens (surface forms).
+4.  **Dependency Graph**: Builds a directed graph (`networkx.DiGraph`) where nodes are words (vocabulary + initial `SEED_WORDS`). An edge `(A, B)` exists if word `A` appears in the example sentence for word `B`. This represents that `A` is conceptually a prerequisite for understanding `B`'s example sentence.
+5.  **Optimal Ordering**: This is the key step.
+    *   **Initialization**: Starts with a set of known words (`SEED_WORDS`). A queue is initialized with all vocabulary words whose example sentences *only* contain words from the `SEED_WORDS` set (i.e., their prerequisites are already met).
+    *   **Iteration**: While the queue is not empty:
+        *   It selects the "best" word from the queue. The "best" word is defined as the one whose example sentence contains the minimum number of tokens *not* currently in the set of known words. **If multiple words have the same minimum cost, the tie is broken by selecting the word with the lower original index (i.e., the one appearing earlier in the initial N5-N1 list).**
+        *   This "best" word is added to the `optimal_order` list and the set of known words.
+        *   The algorithm then checks all vocabulary words that have the newly learned word as a prerequisite (its successors in the graph). For each successor, it checks if *all* of its prerequisites are now in the known set. If so, the successor is added to the queue, making it a candidate for the next learning step.
+    *   **Output**: This process continues until the queue is empty, resulting in the `optimal_vocab_list`.
+    *   **Handling Unorderable Words**: Words from the input vocabulary whose prerequisites are never met (e.g., due to being in disconnected parts of the dependency graph not reachable from the `SEED_WORDS` via the chain of learnable words, or being part of cycles of mutually dependent but unlearnable words) will not be included in the `optimal_vocab_list`. In the final `vocab_order_comparison.csv` output, these words are still listed but are marked with an `optimal_index` of -1 and a `number_of_unknown_tokens` (cost) of -1.
+6.  **Analysis & Output**:
+    *   Compares the `optimal_vocab_list` to the original list, calculating Kendall's Tau for rank correlation (if `scipy` is installed).
+    *   Saves detailed results and comparisons to CSV files.
+    *   Generates plots visualizing the cognitive load (if `matplotlib` is installed).
+
+## Output Files
+
+The script generates the following key files in the project's root directory:
+
+*   `vocab_order_comparison.csv`: Detailed comparison of original vs. optimal order, including sentences, costs, and token information.
+*   `sentence_cache.csv`: Cache of LLM-generated sentences to speed up subsequent runs.
+*   `cognitive_load_plot.png`: (Optional) Plot showing the number of unknown words per sentence in the optimal order.
+*   `cumulative_cognitive_load_plot.png`: (Optional) Plot showing the cumulative number of unknown words throughout the optimal learning sequence.
+*   `cognitive_load_data.csv`: (Optional) Data for the cognitive load plot.
+*   `cumulative_cognitive_load_data.csv`: (Optional) Data for the cumulative cognitive load plot.
+
+## Configuration
+
+*   **Vocabulary Levels & Source:** Defined by `LEVELS` and `BASE_URL` constants in `vocab_order_min_surprise.py`.
+*   **Seed Words:** Provided in `seed_words.txt`.
+*   **Gemini API Key:** Set in the `.env` file.
+*   **Output File Paths:** Defined as constants (e.g., `OUTPUT_CSV_PATH`) in `vocab_order_min_surprise.py`.
