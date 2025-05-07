@@ -51,7 +51,7 @@ VOCAB_COLUMN = "expression" # Column name in CSV containing the vocabulary word
 BASE_URL = "https://raw.githubusercontent.com/elzup/jlpt-word-list/master/src/"
 LEVELS = ["n5.csv", "n4.csv", "n3.csv", "n2.csv", "n1.csv"] # Add more levels if needed
 SEED_WORDS_FILE_PATH = "seed_words.txt" # Path to the seed words file
-OUTPUT_CSV_PATH = "vocab_order_comparison.csv"
+OUTPUT_CSV_PATH = "results/vocab_order_comparison.csv"
 SENTENCE_CACHE_CSV_PATH = "sentence_cache.csv" # New path for sentence cache
 
 # Initialize tokenizer globally (or pass it around if preferred)
@@ -447,6 +447,12 @@ def save_comparison_csv(
         print(f"Note: {unprocessed_count} words were not included in the optimal order and are marked with index -1.")
 
     try:
+        # Create the output directory if it doesn't exist
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created output directory: {output_dir}")
+
         # Define final columns in desired order
         final_columns = [
             'word', 'sentence', 'jlpt_level', 'original_index', 'optimal_index',
@@ -544,11 +550,16 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
     plt.ylabel("Number of Unknown Tokens in Sentence")
     plt.title("Cognitive Load per Step (Min-Surprise Order)")
     plt.grid(True)
-    plot_filename = "cognitive_load_plot.png"
+    plot_filename = "results/cognitive_load_plot.png"
     try:
+        # Ensure the directory exists
+        plot_dir = os.path.dirname(plot_filename)
+        if plot_dir and not os.path.exists(plot_dir):
+            os.makedirs(plot_dir)
+            print(f"Created plot directory: {plot_dir}")
+
         print(f"Saving per-step cognitive load plot to {plot_filename}...")
         plt.savefig(plot_filename)
-        print(f"Per-step cognitive load plot saved to {plot_filename}.")
     except Exception as e:
         print(f"Error saving per-step plot: {e}", file=sys.stderr)
     plt.close() # Close the per-step plot figure
@@ -562,11 +573,16 @@ def plot_cognitive_load(optimal_list: list[str], sentences_map: dict[str, str], 
         plt.ylabel("Cumulative Number of Unknown Tokens")
         plt.title("Cumulative Cognitive Load Curve (Min-Surprise Order)")
         plt.grid(True)
-        cumulative_plot_filename = "cumulative_cognitive_load_plot.png"
+        cumulative_plot_filename = "results/cumulative_cognitive_load_plot.png"
         try:
+            # Ensure the directory exists (it should by now, but check again for robustness)
+            plot_dir = os.path.dirname(cumulative_plot_filename)
+            if plot_dir and not os.path.exists(plot_dir):
+                os.makedirs(plot_dir)
+                # print(f"Created plot directory: {plot_dir}") # No need to print again if already created
+
             print(f"Saving cumulative cognitive load plot to {cumulative_plot_filename}...")
             plt.savefig(cumulative_plot_filename)
-            print(f"Cumulative cognitive load plot saved to {cumulative_plot_filename}.")
         except Exception as e:
             print(f"Error saving cumulative plot: {e}", file=sys.stderr)
         plt.close() # Close the cumulative plot figure

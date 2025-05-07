@@ -1,3 +1,6 @@
 .env
 .DS_Store
+vocab_order_min_surprise_N5_test.py
+.csv
+.png
 
